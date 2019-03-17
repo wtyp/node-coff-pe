@@ -1,4 +1,3 @@
-
 var fs = require('fs');
 
 function parseDosHeader(buf) {
@@ -54,34 +53,30 @@ function serializeDosHeader(buf, hdr) {
 	buf.writeUInt32LE(hdr.oem_info, 60, true);
 }
 
-// cb(err, exehdr)
-function readExe(fd, cb) {
+function readExe(fd) {
 	var buffer = new Buffer(0x40); // expect pe...
-	fs.read(fd, buffer, 0, 0x40, 0, function (err, bytesRead, buf) {
-		if (err) {
-			cb(err);
-		} else if (bytesRead < 0x40) {
-			cb(new Error('File too short'));
-		} else if ((buf[0] !== 0x4d) || (buf[1] !== 0x5a)) { // MZ
-			cb(new Error('Not an EXE file'));
-		} else if ((buf[24] < 0x40) && (buf[25] === 0x00)) {
-			cb(new Error('Not a PE file'));  // TODO?
-		} else {
-			var exehdr = parseDosHeader(buf);
-			var extraStart = exehdr.nblocks * 512;
-			if (exehdr.lastsize) {
-				extraStart += exehdr.lastsize - 512;
-			}
-			exehdr._fileOffsets = {
-				start: 0,
-				relocStart: exehdr.relocpos, // (e.g.) PE-part of header is between 0x1c and this value
-				// relocEnd: exehdr.relocpos + 4*exehdr.nreloc, // (==dataStart...(?))
-				dataStart: exehdr.hdrsize * 16, // reloc is part of hdr!
-				extraStart: extraStart // "after exe data"  // (?? TODO? +dataStart???)
-			};
-			cb(null, exehdr);
+	const bytesRead = fs.readSync(fd, buffer, 0, 0x40, 0)
+	if (bytesRead < 0x40) {
+		throw new Error('File too short')
+	} else if ((buffer[0] !== 0x4d) || (buffer[1] !== 0x5a)) { // MZ
+		throw new Error('Not an EXE file')
+	} else if ((buffer[24] < 0x40) && (buffer[25] === 0x00)) {
+		throw new Error('Not a PE file')  // TODO?
+	} else {
+		var exehdr = parseDosHeader(buffer);
+		var extraStart = exehdr.nblocks * 512;
+		if (exehdr.lastsize) {
+			extraStart += exehdr.lastsize - 512;
 		}
-	});
+		exehdr._fileOffsets = {
+			start: 0,
+			relocStart: exehdr.relocpos, // (e.g.) PE-part of header is between 0x1c and this value
+			// relocEnd: exehdr.relocpos + 4*exehdr.nreloc, // (==dataStart...(?))
+			dataStart: exehdr.hdrsize * 16, // reloc is part of hdr!
+			extraStart: extraStart // "after exe data"  // (?? TODO? +dataStart???)
+		};
+		return exehdr
+	}
 }
 
 function parseSectionHeader(buf, offset) {
@@ -159,43 +154,34 @@ function cstring(buf) {
 	return ret;
 }
 
-// cb(err)  - will modify coffhdr
-function readSectionHeaders(fd, coffhdr, cb) {
-	// assert(coffhdr);
-	var buffer = new Buffer(0x28 * coffhdr.NumberOfSections);
-	fs.read(fd, buffer, 0, buffer.length, coffhdr._fileOffsets.sectionStart, function (err, bytesRead, buf) {
-		if (err) {
-			cb(err);
-		} else if (bytesRead < buf.length) {
-			cb(new Error('File too short'));
-		} else {
-			coffhdr._sectionMap = {};
-			for (var i = 0, len = coffhdr.NumberOfSections; i < len; i++) {
-				var secthdr = parseSectionHeader(buf, 0x28 * i);
-				secthdr._name = cstring(secthdr.Name);
-				coffhdr.SectionHeaders[i] = secthdr;
-				coffhdr._sectionMap[secthdr._name] = i;
-			}
-			cb(null);
+function readSectionHeaders(fd, coffhdr) {
+	var buffer = new Buffer(0x28 * coffhdr.NumberOfSections)
+	const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, coffhdr._fileOffsets.sectionStart)
+	if (bytesRead < buffer.length) {
+		throw new Error('File too short')
+	} else {
+		coffhdr._sectionMap = {};
+		for (var i = 0, len = coffhdr.NumberOfSections; i < len; i++) {
+			var secthdr = parseSectionHeader(buffer, 0x28 * i);
+			secthdr._name = cstring(secthdr.Name);
+			coffhdr.SectionHeaders[i] = secthdr;
+			coffhdr._sectionMap[secthdr._name] = i;
 		}
-	});
+	}
+
+	return coffhdr
 }
 
-// cb(err, length) // length==null, if outside file
-function readStringTableLength(fd, coffhdr, cb) {
-	// assert(coffhdr);
+function readStringTableLength(fd, coffhdr) {
 	var buffer = new Buffer(4);
-	fs.read(fd, buffer, 0, buffer.length, coffhdr._fileOffsets.stringStart, function (err, bytesRead, buf) {
-		if (err) {
-			cb(err);
-		} else if (bytesRead == 0) {
-			cb(null, null);
-		} else if (bytesRead < buf.length) {
-			cb(new Error('File too short?'));
-		} else {
-			cb(null, buf.readUInt32LE(0, true));
-		}
-	});
+	const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, coffhdr._fileOffsets.stringStart)
+	if (bytesRead == 0) {
+		return null
+	} else if (bytesRead < buffer.length) {
+		throw new Error('File too short?');
+	} else {
+		return buffer.readUInt32LE(0, true)
+	}
 }
 
 function parseDataDirectoryEntry(buf, offset) {
@@ -445,77 +431,64 @@ function serializePEOptHeader(hdr) {
 	}
 }
 
-// cb(err, exehdr, coffhdr)
-function readCoffPE(fd, exehdr, cb) {
+function readCoffPE(fd, exehdr) {
 	if (exehdr.e_lfanew === 0) {
-		cb(null, exehdr); // just exe
-		return;
+		return exehdr // just exe
 	} else if (exehdr.e_lfanew <= 0x40) {
-		cb(new Error('Bad e_lfanew value'), exehdr);
-		return;
+		throw new Error(`Bad e_lfanew value`)
 	}
 	var buffer = new Buffer(0x18 + 0x70 + 16 * 8); // %8==0, for parseDataDirectory "alignment"
-	fs.read(fd, buffer, 0, 0x108, exehdr.e_lfanew, function (err, bytesRead, buf) {
-		if (err) {
-			cb(err, exehdr);
-		} else if (bytesRead < 0x18) {
-			cb(new Error('File too short'), exehdr);
-		} else if ((buf[0] !== 0x50) || (buf[1] !== 0x45) || (buf[2] !== 0) || (buf[3] !== 0)) { // PE\0\0  (Signature)   // note: win16,os/2:  NE, LE
-			cb(new Error('Not a (little-endian) PE file'), exehdr);
-		} else {
-			var coffhdr = parseCoffHeader(buf.slice(4));
-			coffhdr._fileOffsets = {
-				start: exehdr.e_lfanew,
-				optionalStart: exehdr.e_lfanew + 0x18,
-				sectionStart: exehdr.e_lfanew + 0x18 + coffhdr.SizeOfOptionalHeader,
-				sectionEnd: exehdr.e_lfanew + 0x18 + coffhdr.SizeOfOptionalHeader + 0x28 * coffhdr.NumberOfSections,
-				headerEnd: null,
-				symbolStart: null,
-				stringStart: null,
-				stringEnd: null
-			};
-			if (coffhdr.PointerToSymbolTable) {
-				coffhdr._fileOffsets.symbolStart = coffhdr.PointerToSymbolTable;
-				coffhdr._fileOffsets.stringStart = coffhdr.PointerToSymbolTable + 0x12 * coffhdr.NumberOfSymbols;
-			}
-			if (coffhdr.SizeOfOptionalHeader) {
-				if (bytesRead < Math.min(0x18 + coffhdr.SizeOfOptionalHeader, buf.length)) { // TODO?!  ... better?
-					cb(new Error('File too short'), exehdr, coffhdr);
-					return;
-				}
-				var peopt = parsePEOptHeader(buf.slice(0x18), coffhdr.SizeOfOptionalHeader);
-				if (typeof peopt === 'string') {
-					// TODO? coffhdr.Optional = buf.slice(0x18, 0x18+coffhdr.SizeOfOptionalHeader);   - but: buf might not contain all of it!
-					cb(new Error(peopt), exehdr, coffhdr);
-					return;
-				}
-				// TODO?  fixup  peopt._more: buf.slice / read all of it   (but: denial of service? ...)
-				coffhdr.Optional = peopt;
-				coffhdr._fileOffsets.headerEnd = coffhdr.Optional.SizeOfHeaders; // not PE: undefined
-				if ((coffhdr.Optional.NumberOfRvaAndSizes) &&  // not: coff optional only, w/o pe
-					(coffhdr.Optional.DataDirectory.length < coffhdr.Optional.NumberOfRvaAndSizes)) { // NumberOfRvaAndSizes > 16 (PE32+; 18 for PE...)
-					var buffer = new Buffer((coffhdr.Optional.NumberOfRvaAndSizes - coffhdr.DataDirectory.length) * 8);
-					// assert(0x108==0x18+coffhdr.SizeOfOptionalHeader-buffer.length); // "alignment" (buf.length%8==0)
-					fs.read(fd, buffer, 0, buffer.length, exehdr.e_lfanew + 0x108, function (err, bytesRead, buf) {
-						if (err) {
-							cb(err, exehdr, coffhdr);
-						} else if (bytesRead < buf.length) {
-							cb(new Error('File too short'), exehdr, coffhdr);
-						} else {
-							// fill in remaining pieces
-							parseDataDirectory(coffhdr.Optional.DataDirectory, coffhdr.Optional.NumberOfRvaAndSizes, buf);
-							// assert(coffhdr.Optional.DataDirectory.length==coffhdr.DataDirectory.NumberOfRvaAndSizes);
-							cb(null, exehdr, coffhdr);
-						}
-					});
-					return;
-				}
-			} else {
-				coffhdr._fileOffsets.headerEnd = coffhdr._fileOffsets.sectionEnd; // TODO?
-			}
-			cb(null, exehdr, coffhdr);
+	const bytesRead = fs.readSync(fd, buffer, 0, 0x108, exehdr.e_lfanew)
+	if (bytesRead < 0x18) {
+		throw new Error('File too short')
+	} else if ((buffer[0] !== 0x50) || (buffer[1] !== 0x45) || (buffer[2] !== 0) || (buffer[3] !== 0)) { // PE\0\0  (Signature)   // note: win16,os/2:  NE, LE
+		throw new Error('Not a (little-endian) PE file')
+	} else {
+		var coffhdr = parseCoffHeader(buffer.slice(4));
+		coffhdr._fileOffsets = {
+			start: exehdr.e_lfanew,
+			optionalStart: exehdr.e_lfanew + 0x18,
+			sectionStart: exehdr.e_lfanew + 0x18 + coffhdr.SizeOfOptionalHeader,
+			sectionEnd: exehdr.e_lfanew + 0x18 + coffhdr.SizeOfOptionalHeader + 0x28 * coffhdr.NumberOfSections,
+			headerEnd: null,
+			symbolStart: null,
+			stringStart: null,
+			stringEnd: null
+		};
+		if (coffhdr.PointerToSymbolTable) {
+			coffhdr._fileOffsets.symbolStart = coffhdr.PointerToSymbolTable;
+			coffhdr._fileOffsets.stringStart = coffhdr.PointerToSymbolTable + 0x12 * coffhdr.NumberOfSymbols;
 		}
-	});
+		if (coffhdr.SizeOfOptionalHeader) {
+			if (bytesRead < Math.min(0x18 + coffhdr.SizeOfOptionalHeader, buffer.length)) { // TODO?!  ... better?
+				throw new Error('File too short')
+			}
+			var peopt = parsePEOptHeader(buffer.slice(0x18), coffhdr.SizeOfOptionalHeader);
+			if (typeof peopt === 'string') {
+				// TODO? coffhdr.Optional = buffer.slice(0x18, 0x18+coffhdr.SizeOfOptionalHeader);   - but: buffer might not contain all of it!
+				throw new Error(peopt)
+			}
+			// TODO?  fixup  peopt._more: buffer.slice / read all of it   (but: denial of service? ...)
+			coffhdr.Optional = peopt;
+			coffhdr._fileOffsets.headerEnd = coffhdr.Optional.SizeOfHeaders; // not PE: undefined
+			if ((coffhdr.Optional.NumberOfRvaAndSizes) &&  // not: coff optional only, w/o pe
+				(coffhdr.Optional.DataDirectory.length < coffhdr.Optional.NumberOfRvaAndSizes)) { // NumberOfRvaAndSizes > 16 (PE32+; 18 for PE...)
+				var buffer2 = new Buffer((coffhdr.Optional.NumberOfRvaAndSizes - coffhdr.DataDirectory.length) * 8);
+				const bytesRead = fs.read(fd, buffer2, 0, buffer2.length, exehdr.e_lfanew + 0x108)
+				if (bytesRead < buffer2.length) {
+					throw new Error('File too short')
+				} else {
+					// fill in remaining pieces
+					parseDataDirectory(coffhdr.Optional.DataDirectory, coffhdr.Optional.NumberOfRvaAndSizes, buffer2);
+					// assert(coffhdr.Optional.DataDirectory.length==coffhdr.DataDirectory.NumberOfRvaAndSizes);
+					return { exehdr, coffhdr }
+				}
+			}
+		} else {
+			coffhdr._fileOffsets.headerEnd = coffhdr._fileOffsets.sectionEnd; // TODO?
+		}
+		return { exehdr, coffhdr }
+	}
 }
 
 function getSectionHeader(coffhdr, name) {
@@ -528,66 +501,56 @@ function getSectionHeader(coffhdr, name) {
 	return null;
 }
 
-function readBlock(fd, offset, length, cb) {
-	var buffer = new Buffer(length);
-	fs.read(fd, buffer, 0, buffer.length, offset, function (err, bytesRead, buf) {
-		if (err) {
-			cb(err);
-		} else if (bytesRead !== buf.length) {
-			cb(new Error('Bad read length'));
-		} else {
-			cb(null, buf);
-		}
-	});
-}
-
-const read = (fd, cb) => {
-	var dataname = this.PEDataDirectory;
-	readExe(fd, function (err, exehdr) {
-		if (err) {
-			cb(err);
-		} else {
-			readCoffPE(fd, exehdr, function (err, exehdr, coffhdr) {
-				if ((err) || (!exehdr) || (!coffhdr)) {
-					cb(err, exehdr, coffhdr);
-					return;
-				}
-				// prettify output
-				if ((coffhdr.Optional) && (coffhdr.Optional.DataDirectory)) {
-					for (var i = 0, len = coffhdr.Optional.DataDirectory.length; i < len; i++) {
-						if (dataname[i]) {
-							coffhdr.Optional.DataDirectory[i].name = dataname[i];
-						}
-					}
-				}
-				readSectionHeaders(fd, coffhdr, function (err) {
-					if ((!err) && (coffhdr.PointerToSymbolTable)) {
-						readStringTableLength(fd, coffhdr, function (err, len) {
-							if ((!err) && (len !== null)) {
-								coffhdr._fileOffsets.stringEnd = coffhdr._fileOffsets.stringStart + len;
-							}
-							cb(err, exehdr, coffhdr);
-						});
-					} else {
-						// stringEnd = null.
-						cb(err, exehdr, coffhdr);
-					}
-				});
-			});
-		}
-	})
-}
-
-const getSection = (fd, coffhdr, name, cb) => {
-	var hdr = getSectionHeader(coffhdr, name);
-	if (!hdr) {
-		cb(null, null); // Section not found
-		return;
+function readBlock(fd, offset, length) {
+	var buffer = new Buffer(length)
+	const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, offset)
+	if (bytesRead !== buffer.length) {
+		throw new Error('Bad read length');
+	} else {
+		return buffer
 	}
-	readBlock(fd, hdr.PointerToRawData, Math.min(hdr.PhysicalAddress_VirtualSize, hdr.SizeOfRawData), cb); // TODO? [0 padded in real load...]
 }
 
-module.exports = {
+const read = (fd) => {
+	var dataname = exportsObj.PEDataDirectory
+	let exehdr = readExe(fd), coffhdr
+	({ exehdr, coffhdr } = readCoffPE(fd, exehdr))
+	if ((!exehdr) || (!coffhdr)) {
+		throw new Error('Missing exehdr or coffhdr')
+	}
+
+	// prettify output
+	if ((coffhdr.Optional) && (coffhdr.Optional.DataDirectory)) {
+		for (var i = 0, len = coffhdr.Optional.DataDirectory.length; i < len; i++) {
+			if (dataname[i]) {
+				coffhdr.Optional.DataDirectory[i].name = dataname[i];
+			}
+		}
+	}
+	coffhdr = readSectionHeaders(fd, coffhdr)
+	if (coffhdr.PointerToSymbolTable) {
+		const len = readStringTableLength(fd, coffhdr)
+		if (len !== null) {
+			coffhdr._fileOffsets.stringEnd = coffhdr._fileOffsets.stringStart + len
+			return {exehdr, coffhdr}
+		}
+		else {
+			throw new Error('Length is null')
+		}
+	} else {
+		return {exehdr, coffhdr};
+	}
+}
+
+const getSection = (fd, coffhdr, name) => {
+	var hdr = getSectionHeader(coffhdr, name)
+	if (!hdr) {
+		return null // Section not found
+	}
+	return readBlock(fd, hdr.PointerToRawData, Math.min(hdr.PhysicalAddress_VirtualSize, hdr.SizeOfRawData)) // TODO? [0 padded in real load...]
+}
+
+const exportsObj = {
 	read,
 	getSectionHeader,
 	getSection,
@@ -703,5 +666,7 @@ module.exports = {
 		0x40000000: 'MEM_READ',
 		0x80000000: 'MEM_WRITE'
 	}
-};
+}
+
+module.exports = exportsObj;
 
